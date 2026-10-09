@@ -1,181 +1,87 @@
-# LIME
+# 语流 · Yuliu IME
 
-llm 驱动的输入法。目前支持拼音。
+基于 [LIME](https://github.com/xushengfeng/lime) 二次开发的本地大模型拼音输入法原型。当前重点是 Windows ARM64 / Snapdragon Hexagon NPU：候选由模型概率与拼音约束生成，Rime 提供系统输入法界面。
 
-llm 常用的文本生成方式是自回归，也就是预测下一个词（token）的所有可能，然后通过某种方式采样选择某个可能，追加到模型输入，然后再次预测。这个项目，把词可能的选择采样交给了用户拼音，利用用户拼音来辅助采样。
+**这是实验原型，准确率和完整的编辑上下文支持尚不能替代成熟输入法。**
 
-使用小型大模型 Qwen3-0.6B-IQ4_XS ，兼顾速度和联想能力，打字时速度和普通引擎基本无异。
+## 当前实现
 
-python 版本的见[python 分支](https://github.com/xushengfeng/lime/tree/python)，此版本用 ts 重写。
+- 默认 Qwen3-1.7B Q4_0，使用 GenieX 的 `llama_cpp:npu` / HTP0；故障不自动降级 CPU。
+- 最近 256 个上屏字符组成前文，整段重新分词，避免一两个字分次上屏影响分词。
+- 网页和 Rime 请求携带各自前文；同一模型服务切换时恢复对应上下文。
+- 模型下一 token 概率经过拼音过滤，多 token 词句按拼音继续补全。
+- 严格拼音匹配，关闭上游默认模糊音；按匹配覆盖长度分组，用模型概率排序。
+- Rime 通过常驻 Windows 命名管道连接服务，避免逐键启动 curl。
+- 简洁横排候选窗，浅色/深色主题，自动测试和分阶段性能日志。
 
-> [!CAUTION]
-> 本项目的结构是运行一个 ai 服务器，输入法前端发送按键数据到服务器计算，然后返回你选择的文字\
-> Rime 输入法前端可以使用 HiAE 对 `/candidates` 和 `/commit` 的请求与响应做加密认证\
-> 你的按键输入仍然可能包括了你大部分隐私，请不要把服务器暴露在公网或不可信局域网\
-> 如果关闭 HiAE 或使用开发 curl 示例，请只在本机可信环境中调试
+## 本机启动
 
-## 运行
+要求：Windows ARM64、受 GenieX 支持的 Qualcomm NPU、原生 ARM64 Node.js、可用于安装包的 Python/pip、PowerShell。
 
-需要有 deno.js 运行时，见[官网](https://deno.com/)
-
-下载本项目，建议通过命令`git clone https://github.com/xushengfeng/lime`，后续可以获取更新，当然也可以下载压缩包
-
-建议切换到某个tag使用，或者在release上下载某个tag，这些tag是验证过的版本而不是中途开发可能存在问题的代码。
-
-### 安装依赖
-
-```shell
-deno install
+```powershell
+./setup.ps1
+./start.ps1
+./open-demo.ps1
+# 停止两个本地服务
+./stop.ps1
 ```
 
-### 下载模型
+`setup.ps1` 将运行时和 GenieX 下载至 `work/`，按固定版本下载模型至 `models/` 并校验 SHA-256，安装 LIME 依赖，生成本地密钥、网页和 Rime 配置。它不会注册系统输入法或自动安装小狼毫。首次设置需要网络；安装后的推理只在本机运行。
 
-```shell
-git clone https://www.modelscope.cn/unsloth/Qwen3-0.6B-GGUF.git
+网页地址：http://127.0.0.1:5000/try.html 。切到英文键盘，输入拼音，空格选首项，数字 1–9 选词。可以设置上下文测试消歧。
+
+## Rime 接入
+
+先安装 [官方小狼毫](https://github.com/rime/weasel/releases)，注册 Windows 输入法的管理员确认由用户完成。然后：
+
+```powershell
+python work/stage_rime.py
 ```
 
-模型文件夹的位置和项目应该是同级的，当然你也可以修改代码
+生成文件来自 `lime/rime/`，本地含密钥的副本放在 `outputs/rime-npu/`；部署脚本复制到 `%APPDATA%/Rime`。如果已有 `default.custom.yaml`，脚本会保留它，请将 `llm` 加入原有 schema_list。在小狼毫中执行“重新部署”，按 F4 或 Ctrl+反引号选择“大模型拼音”。
 
-### 开启服务器
-
-```shell
-deno serve -A --port 5000 server.ts
-```
-
-创建密钥，一定程度上防止被滥用或隐私泄露
-
-```shell
-deno run -A key.ts
-```
-
-如果只是先看看这个项目的效果，可以跳转到下面的[说明](#前端)
-
-## 作为输入法
-
-这里使用[rime](https://rime.im/)作为前端。
-
-复制项目 rime 文件夹里面的内容到你的 rime 输入法配置里面。可以修改`default.yaml`的`schema_list`，添加`-  schema: llm`，或者创建`default.custom.yaml`，内容如下：
-
-```yaml
-patch:
-    schema_list/+:
-        - schema: llm
-```
-
-总而言之，在rime里面启用`llm`这个schema。
-
-确保系统安装了 [curl](https://curl.se/download.html)，大部分系统如Windows（win10 1803+）、Linux、macOS 都自带了。
-
-创建密钥`deno run -A key.ts`，只需要创建一次，把输出的密钥改写在`llm_pinyin.lua`的`key`变量里面。
-
-默认开启 HiAE 加密。还需要把`llm_pinyin.lua`中的`hiae_payload`改成 lime 项目里`hiae_payload.ts`的绝对路径，例如`/home/me/lime/hiae_payload.ts`。加密模式下 Lua 端不会发送明文 bearer key，服务端会用`key.txt`里保存的 key hash 验证并解密请求。
-
-如果需要临时回退到旧的明文 bearer 请求，可以把`llm_pinyin.lua`里的`enable_hiae`改成`false`。
-
-开启服务器，切换到 llm 拼音输入法即可使用。
-
-注意，并不能与你其他的 rime 输入法结合，只能作为一个新的 rime 输入法。
-
-## 特性
-
-除了 ai 优化，还有一些输入法特性：
-
-- 模糊音，可自定义转化表
-- 双拼（自然码、搜狗、微软、小鹤、智能 ABC、拼音加加、紫光，自定义）
-- `'`号分割拼音
+可选扁平主题：将生成的 `weasel.custom.yaml` 合并到 Rime 用户目录，再重新部署；不要覆盖自己的已有设置。
 
 ## 配置
 
-复制`config.ts`为`user_config.ts`，在`user_config.ts`里面修改配置。
-
-比如可以把`shuangpin`的值改成`false`或者改成其他双拼方案。
-
-建议使用现代的代码编辑器修改，比如 vscode、zed、neovim 等，它们提供代码检查，改配置时可以避免错误。
-
-## 现状
-
-长句的输入可能并不智能。
-
-输入太快可能会漏字母。
-
-没有保存数据的功能，也没有生词记录，所以服务器重启后会丢失记忆。
-
-## 理解与展望
-
-模型有的地方让人惊喜，有些候选又不合适地排在后面。总的来说，联想能力不输以前传统大厂的输入法，利好开源输入法，但 AI 时代竞争会更激烈，大厂的或者新加入的输入法会更智能。
-
-从拼音引导文字生成来看，人对语音的理解不是顺序的，是大体上顺序，小范围逆序，一些音的识别在后面才会有明确的结果或纠正。现在这个项目只能对部分置信度高的候选生成长词组，对于更长的长句，没有一定的把握是不会生成的。我了解到 fim 补全模式，这可以是一个方向，用它来表示没有把握的候选，但并不能提供拼音信息。有几种方向（AI 也告诉我了一些，我不是专业的，仅抛砖引玉），可以修改 mask，让拼音候选匹配的文字权重加大，占用位置编码，但不具体下来；类似翻译模型，前后关系在模型内部处理。为了更好补全，可以微调模型，减少其在指令遵循、编程相关的能力，提高其文学能力。另外发现不同的 token 粒度对置信度影响较大，在“ta de”中，“他的”是一个 token，但“他”和“的”各是一个 token，“他的”排名靠后，但“他”\*“的”的置信度还会更低，所以现在输入法采取长词优先，尽管这个不符合置信度排序。
-
-在应用方面来说，不同焦点的切换应该发生给模型以提示，否则容易串。删除或者光标改变也应该考虑。这些输入法框架应该具有相关功能，我研究一下。
-
-## 开发
-
-Rime 前端默认使用 HiAE 加密。下面的 curl 示例仍保留为本机开发调试用的明文接口，需要传入 bearer key。
-
-可以发送按键让引擎分析
-
-```shell
-curl --request POST \
-  --url http://127.0.0.1:5000/candidates \
-  --header 'content-type: application/json' \
-  --header 'Authorization: Bearer your key' \
-  --data '{
-  "keys": "nihaoshijie"
-}'
+```powershell
+$env:LIME_CONTEXT_CHARS='256'
+# 需要先自行下载兼容的 Q4_0 GGUF；分词器和 NPU 使用同一模型。
+$env:LIME_MODEL='Qwen3-1.7B-Q4_0.gguf'
+./start.ps1
 ```
 
-返回
+Rime 的 `llm_context/history_chars` 也需与服务窗口一致。Node 仅加载模型词表，不创建 CPU 推理上下文。GenieX 的 Python 包由 ARM64 嵌入 Python 加载，避免 x64 Python 无法加载 ARM64 DLL。
 
-```json
-{
-    "candidates": [
-        {
-            "pinyin": ["ni", "hao", "shi", "jie"],
-            "score": 1.1879427571978856e-13,
-            "word": "你好世界"
-        }
-    ]
-}
+## 测试和日志
+
+```powershell
+python work/quality_benchmark.py local
+python work/test_context_npu.py
+python work/benchmark.py
 ```
 
-选好词后，发送，将作为上下文记录
+Rime 引擎测试还需 `work/weasel-all/` 中的小狼毫 x64 DLL 和 data 文件（从官方安装包用 7-Zip 提取）：
 
-```shell
-curl --request POST \
-  --url http://127.0.0.1:5000/commit \
-  --header 'content-type: application/json' \
-  --header 'Authorization: Bearer your key' \
-  --data '{
-  "text": "你好世界"
-}'
+```powershell
+python work/test_rime_npu.py
+python work/test_rime_short_context.py
 ```
 
-### 其他输入方案
+测试使用预设文本，会更新测试客户端上下文。日志在 `work/performance.jsonl`、`work/server*.log` 和 `work/npu-server*.log`；其中可能包含输入文字，默认不提交到 Git。`npu_request`、`model_evaluate`、`candidate_filter`、`lock_wait` 分别帮助定位推理、后处理与等待时间。
 
-添加类似`key_to_pinyin`的函数，用于把输入按键转换为文字索引，放在`key_map`文件夹下。添加类似`load_pinyin`的函数，提供把文字转为索引的方法。
+Snapdragon X Elite 上一次短时调试样本：缓存候选更新约 5–29 ms，新多 token 补全约 116–133 ms。18 个手选调试用例首选符合预期，**不代表通用准确率，也不证明大模型一定更准**。性能会随上下文和输入长度变化。
 
-## 测试
+## 已知限制与开发方向
 
-用deno运行`test/test_text.ts`，将会按照输入较长句子的拼音，然后去统计其索引、按键数、提交数量等记录下来，还提供了一个计算的交互方式，根据按键速度（kpm）等计算理论上的打字速度（cpm）等数据。
+- 多 token 补词主要走一条路径，需要多路径搜索、整句比较和更可靠的拼音切分。
+- 没有完整获取光标附近的文档内容；删除、移动光标、粘贴和已有文字尚未同步。
+- 近期前文是会话内的上屏记录，不是用户文档的权威副本。
+- `forward_logits` 会清空原生 KV；当前缓存复用相同 token 前缀的结果，不是跨滑动窗口的增量 KV 复用。
+- 下一步重点：候选搜索、用户选词学习、上下文同步、增量推理与延迟预算。
 
-## 统计
+## 安全与许可证
 
-服务器会尝试统计按键的速度（按照相邻请求来计算）、实际输入文字时间、查找候选的时间等，通过`/inputlog`可以获取，可以使用中位数等或者平均数计算你自己相关的打字数据。
+服务仅监听本机并要求本地访问密钥。不要上传 `work/local-key.txt`、`lime/key.txt`、生成的试打 HTML、生成的 Rime Lua、输入日志或环境变量。模型、运行环境和依赖二进制不随代码分发。
 
-## 高级配置
-
-### 使用ollama的模型
-
-添加`import { getOllamaModel } from "./utils/load_from_ollama.ts";`
-
-`initLIME`的参数中设置`modelPath`，添加`getOllamaModel('模型名称')`，名称为`ollama list`命令列出的模型名称。
-
-## 前端
-
-执行`deno run install_interface`和`deno run build_interface`
-
-重启服务器
-
-访问 http://127.0.0.1:5000/demo.html?passwd=你的密码 将有个模拟平时输入法界面的页面
-
-其他界面在 http://127.0.0.1:5000 可以导航，如上下文获取、输入统计计算等
+本项目及修改遵循 GPL-3.0，保留上游历史、许可证和来源。详见 [UPSTREAM.md](UPSTREAM.md) 和 [LICENSE](LICENSE)。模型、GenieX、Rime 和其他依赖遵循各自许可证。

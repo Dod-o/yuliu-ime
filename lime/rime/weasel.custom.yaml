@@ -1,0 +1,53 @@
+patch:
+  style/color_scheme: llm_flat_light
+  style/color_scheme_dark: llm_flat_dark
+  style/font_face: Microsoft YaHei UI
+  style/label_font_face: Microsoft YaHei UI
+  style/comment_font_face: Microsoft YaHei UI
+  style/font_point: 14
+  style/label_font_point: 10
+  style/comment_font_point: 10
+  style/horizontal: true
+  style/inline_preedit: true
+  style/display_tray_icon: false
+  style/label_format: "%s"
+  style/mark_text: ""
+  style/layout/min_width: 0
+  style/layout/border_width: 1
+  style/layout/margin_x: 12
+  style/layout/margin_y: 8
+  style/layout/spacing: 6
+  style/layout/candidate_spacing: 18
+  style/layout/hilite_spacing: 6
+  style/layout/hilite_padding: 5
+  style/layout/round_corner: 4
+  style/layout/corner_radius: 6
+  style/layout/shadow_radius: 0
+  preset_color_schemes/llm_flat_light:
+    name: 简洁浅色
+    back_color: 0xFFFFFF
+    border_color: 0xEEEAE7
+    text_color: 0x39332D
+    candidate_text_color: 0x39332D
+    label_color: 0xA49C94
+    comment_text_color: 0xA49C94
+    hilited_text_color: 0x39332D
+    hilited_back_color: 0xFFFFFF
+    hilited_candidate_text_color: 0x39332D
+    hilited_candidate_back_color: 0xF5EFE9
+    hilited_label_color: 0x8C8175
+    shadow_color: 0x00000000
+  preset_color_schemes/llm_flat_dark:
+    name: 简洁深色
+    back_color: 0x242424
+    border_color: 0x363636
+    text_color: 0xEEEEEE
+    candidate_text_color: 0xEEEEEE
+    label_color: 0x999999
+    comment_text_color: 0x999999
+    hilited_text_color: 0xEEEEEE
+    hilited_back_color: 0x242424
+    hilited_candidate_text_color: 0xFFFFFF
+    hilited_candidate_back_color: 0x3B3B3B
+    hilited_label_color: 0xBBBBBB
+    shadow_color: 0x00000000

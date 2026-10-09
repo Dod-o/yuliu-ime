@@ -65,3 +65,6 @@ recognizer:
 menu:
     page_size: 5
     horizontal: true
+
+llm_context:
+    history_chars: 256

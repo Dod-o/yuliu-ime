@@ -1,3 +1,4 @@
+import net from "node:net";
 import { Hono, type Context } from "hono";
 import { bearerAuth } from "hono/bearer-auth";
 import { cors } from "hono/cors";
@@ -14,15 +15,8 @@ import {
 } from "./utils/secure_payload.ts";
 import type { Config } from "./utils/config.d.ts";
 
-let userConfig: Config | undefined;
-
-try {
-	userConfig = (await import("./user_config.ts")).default;
-} catch {
-	console.log("使用默认配置");
-}
-
-const config = userConfig || (await import("./config.ts")).default;
+// Fail closed if the selected NPU backend cannot load.
+const config: Config = (await import("./user_config.ts")).default;
 
 const { single_ci, commit, getUserData, addUserWord } = config.runner;
 
@@ -98,6 +92,15 @@ api.use("/*", async (c, next) => {
 	return middleware(c, next);
 });
 
+// A single model context is shared; serialize mutations across both frontends.
+let pending = Promise.resolve();
+api.use("*", async (_c,next) => {
+ const previous=pending;
+ const slot=Promise.withResolvers<void>();
+ pending=slot.promise;
+ await previous;
+ try { await next(); } finally {slot.resolve();}
+});
 api.use("*", logger());
 
 async function readRequestJson<T>(
@@ -121,9 +124,18 @@ function jsonResponse(c: Context, value: unknown, key?: Uint8Array) {
 	return c.json(encryptJson(value, key));
 }
 
+api.post("/context", async (c) => {
+ const {text = ""} = await c.req.json<{text?: string}>();
+ await config.runner.reset_context();
+ if(text) await commit(text);
+ await config.runner.getEvalResult();
+ return c.json({device:"HTP0",model:Deno.env.get("LIME_MODEL") ?? "Qwen3-1.7B-Q4_0.gguf",ready:true});
+});
+
 api.post("/candidates", async (c) => {
-	const { body, responseKey } = await readRequestJson<{ keys?: string }>(c);
+	const { body, responseKey } = await readRequestJson<{ keys?: string; context?: string }>(c);
 	const keys = body.keys || "";
+    if (typeof body.context === "string") await config.runner.sync_context(body.context);
 
 	console.log(keys);
 	const time = Date.now();
@@ -157,6 +169,7 @@ api.post("/commit", async (c) => {
 	try {
 		const { body, responseKey } = await readRequestJson<{
 			text?: string;
+            context?: string;
 			new?: boolean;
 			update?: boolean;
 		}>(c);
@@ -168,7 +181,8 @@ api.post("/commit", async (c) => {
 			throw new HTTPException(400, { message: "未提供文本内容" });
 		}
 
-		const newT = await commit(text, shouldUpdate, isNew);
+		if (typeof body.context === "string") await config.runner.sync_context(body.context);
+        const newT = await commit(text, shouldUpdate, isNew);
 
 		if (isNew) {
 			if (inputLog.lastZiTime !== null)
@@ -256,5 +270,30 @@ app.post("/candidates", (c) => {
 app.post("/commit", (c) => {
 	return api.fetch(c.req.raw);
 });
+
+// Rime Lua can open a Windows named pipe directly, avoiding per-key subprocesses.
+const pipeServer=net.createServer((socket)=>{
+ socket.setEncoding("utf8");
+ let buffer=""; let chain=Promise.resolve();
+ socket.on("error",()=>{});
+ socket.on("data",chunk=>{
+  buffer+=chunk;
+  if(buffer.length>1024*1024){socket.destroy();return;}
+  let newline;
+  while((newline=buffer.indexOf("\n"))>=0){
+   const line=buffer.slice(0,newline);buffer=buffer.slice(newline+1);
+   chain=chain.then(async()=>{
+    try {
+     const message=JSON.parse(line);
+     if(!["candidates","commit","context"].includes(message.route))throw Error("Invalid route");
+     const response=await app.request("http://localhost/api/"+message.route,{method:"POST",headers:{"Content-Type":"application/json",Authorization:"Bearer "+message.key},body:JSON.stringify(message.body)});
+     socket.write(JSON.stringify({code:response.status,body:await response.text()})+"\n");
+    }catch {socket.write(JSON.stringify({code:500,body:"{}"})+"\n");}
+   });
+  }
+ });
+});
+pipeServer.listen("\\\\.\\pipe\\lime-npu");
+pipeServer.on("error",error=>console.error("Rime pipe failed",error));
 
 export default app;

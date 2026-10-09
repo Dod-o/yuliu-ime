@@ -1,4 +1,6 @@
 import path from "node:path";
+import { phase, syncPhase, trace } from "./utils/perf.ts";
+import { npuContext } from "./utils/npu_context.ts";
 import { fileURLToPath } from "node:url";
 import {
 	getLlama,
@@ -36,7 +38,7 @@ class Lock {
 	private pm: Promise<void> | null = null;
 
 	async acquire() {
-		if (this.pm) await this.pm;
+		if (this.pm) await phase("lock_wait", () => this.pm!);
 	}
 
 	async lock() {
@@ -68,11 +70,13 @@ export async function loadModel(op?: {
 
 	const model = await llama.loadModel({
 		modelPath: modelPath,
+		vocabOnly: Deno.env.get("LIME_BACKEND") !== "cpu",
 	});
-	const context = await model.createContext({
+	const context = Deno.env.get("LIME_BACKEND") === "cpu" ? await model.createContext({
 		contextSize: { max: op?.contextSize ?? 4096 },
-	});
-	console.log("加载完成");
+		threads: Number(Deno.env.get("LIME_THREADS") ?? 4),
+	}) : npuContext(512);
+	console.log("加载完成", JSON.stringify({device:Deno.env.get("LIME_BACKEND") === "cpu" ? "CPU" : "HTP0 NPU", idealThreads:context.idealThreads,currentThreads:context.currentThreads,contextSize:context.contextSize,batchSize:context.batchSize,flashAttention:context.flashAttention}));
 
 	return { model, context };
 }
@@ -108,7 +112,29 @@ export class LIME {
 	first_pinyin_token = new Map<string, Set<number>>();
 	unIndexedZi = new Map<string, Set<string>>();
 
-	private pre_context = "下面的内容主题多样";
+	private timedEvaluate = async (...args: Parameters<LlamaContextSequence["controlledEvaluate"]>) => {
+        const before=this.sequence.tokenMeter.getState();
+        return phase("model_evaluate", () => this.sequence.controlledEvaluate(...args), () => ({
+            tokens:this.sequence.tokenMeter.diff(before), contextTokens:this.sequence.contextTokens.length,
+            currentThreads:this.context.currentThreads, idealThreads:this.context.idealThreads
+        }));
+    };
+    private timedErase = (...args: Parameters<LlamaContextSequence["eraseContextTokenRanges"]>) =>
+        phase("context_erase", () => this.sequence.eraseContextTokenRanges(...args));
+
+	private pre_context = "下面是中文输入内容：";
+    private committedText = "";
+    private historyChars = Math.max(32, Math.min(1000, Number(Deno.env.get("LIME_CONTEXT_CHARS") ?? 256)));
+    get committedContext() { return this.committedText; }
+    private recentText(text: string) { return Array.from(text).slice(-this.historyChars).join(""); }
+    sync_context = async (text: string) => {
+        await this.modelEvalLock.acquire();
+        const recent = this.recentText(text);
+        if (recent === this.committedText) return;
+        await this.reset_context();
+        if (recent) await this.commit(recent);
+        await this.getEvalResult();
+    };
 	last_context_data = { context: "" };
 	private userTokens = new Map<ExToken, Array<Token>>();
 	private userTokensFirstIndex = new Map<Token, Set<ExToken>>();
@@ -226,7 +252,7 @@ export class LIME {
 			.slice(-Math.max(this.smallerMaxCount - this.rm_count, 1));
 
 		await this.sequence.clearHistory();
-		await this.sequence.controlledEvaluate([
+		await this.timedEvaluate([
 			...newTokens.slice(0, -1),
 			[
 				// biome-ignore lint/style/noNonNullAssertion: none
@@ -254,16 +280,17 @@ export class LIME {
 		if (this.sequence.contextTokens.length <= maxCount) {
 			return;
 		}
-		await this.sequence.eraseContextTokenRanges([
+		await this.timedErase([
 			{
-				start: maxCount,
-				end: this.sequence.contextTokens.length,
+				start: 0,
+				end: this.sequence.contextTokens.length - maxCount,
 			},
 		]);
 		this.lastCommitOffset = this.sequence.contextTokens.length;
 	};
 
-	commit = async (text: string, update = false, newT = true) => {
+	commit = (text: string, update = false, newT = true) => trace("commit_ack", {text}, () => this.commit_impl(text, update, newT));
+	private commit_impl = async (text: string, update = false, newT = true) => {
 		let new_text = "";
 		let nt = newT;
 
@@ -288,23 +315,22 @@ export class LIME {
 
 		// todo shift context
 
-		const to_run = this.model.tokenizer(new_text);
+		// Retokenize the whole recent paragraph, independent of commit boundaries.
+        this.committedText = this.recentText(this.committedText + new_text);
+        const to_run = this.model.tokenizer(this.pre_context + this.committedText).slice(-this.smallerMaxCount);
+
 		if (to_run.length === 0) return;
 
 		const pre = to_run.slice(0, -1);
 		const last = to_run[to_run.length - 1];
 		const { release } = await this.modelEvalLock.lock();
-		// 强制commit耗时的部分为异步执行，避免请求阻塞
-		(async () => {
-			await this.fastTryOmitContext(pre.length + 1);
-			// todo 根据缓存判断，比如长句实际上已经近似提交了
-			await this.sequence.eraseContextTokenRanges([
-				{
-					start: this.lastCommitOffset,
-					end: this.sequence.contextTokens.length,
-				},
-			]);
-			const res = await this.sequence.controlledEvaluate([
+		// 后台更新独立计时，保留原有异步提交行为
+		void trace("commit_background", {text}, async () => {
+            try {
+			// Rebuild logical tokens; NPU prefix cache reuses identical distributions.
+			// Drop speculative completion tokens before evaluating the canonical paragraph.
+			await this.sequence.clearHistory();
+			const res = await this.timedEvaluate([
 				...pre,
 				[
 					last,
@@ -321,8 +347,8 @@ export class LIME {
 				this.last_result?.set(i, 0);
 			}
 			this.lastCommitOffset = this.sequence.contextTokens.length;
-			release();
-		})();
+			} finally { release(); }
+		});
 
 		this.omitContext.reset();
 
@@ -332,7 +358,9 @@ export class LIME {
 	reset_context = async () => {
 		await this.modelEvalLock.acquire();
 		this.last_context_data.context = "";
+        this.committedText = "";
 		this.userTokens.clear();
+		this.longSentenceCache = [];
 		await this.sequence.clearHistory();
 		await this.init_ctx();
 	};
@@ -388,7 +416,8 @@ export class LIME {
 		return true;
 	};
 
-	single_ci = async (pinyin_input: ZiIndL): Promise<Result> => {
+	single_ci = (pinyin_input: ZiIndL): Promise<Result> => trace("candidates", {keys:pinyin_input.map(syllable => syllable[0]?.key ?? "").join(""),pinyin:pinyin_input,contextTokens:this.sequence.contextTokens.length,threads:this.context.idealThreads}, () => this.single_ci_impl(pinyin_input));
+	private single_ci_impl = async (pinyin_input: ZiIndL): Promise<Result> => {
 		if (pinyin_input.length === 0 || pinyin_input[0].length === 0) {
 			return { candidates: [] };
 		}
@@ -405,7 +434,7 @@ export class LIME {
 		const filterByPinyin = (
 			pinyin_input: ZiIndL,
 			last_result: Map<ExToken, number>,
-		) => {
+		) => syncPhase("candidate_filter", () => {
 			const new_last_result = new Map<
 				ExToken,
 				{ py: ZiIndAndKey[]; prob: number; token: string }
@@ -417,7 +446,8 @@ export class LIME {
 				for (const tokenid of s) ftokenid.add(tokenid);
 			}
 
-			for (const [token_id, token_prob] of last_result) {
+			for (const token_id of [...ftokenid].sort((a,b)=>(last_result.get(b) ?? 0)-(last_result.get(a) ?? 0))) {
+                const token_prob = last_result.get(token_id) ?? 0;
 				if (!ftokenid.has(token_id)) continue;
 				const token = this.detoken([token_id]);
 				if (!token) continue;
@@ -441,36 +471,13 @@ export class LIME {
 				v.prob /= scoreSum;
 			}
 
-			// 长词优先
-			const first = new_last_result.values().next().value;
-			if ((first?.prob ?? 0) < 0.9) {
-				const n = new Map() as typeof new_last_result;
-
-				let maxLen = 0;
-				let longToken: typeof first;
-				let longTokenId: ExToken | undefined;
-				for (const [k, v] of new_last_result) {
-					if (v.py.length > maxLen) {
-						maxLen = v.py.length;
-						longToken = v;
-						longTokenId = k;
-					}
-				}
-				let reOrder = false;
-				if (maxLen > 1 && longToken && longTokenId) {
-					n.set(longTokenId, longToken);
-					reOrder = true;
-				}
-				for (const [k, v] of new_last_result) {
-					if (reOrder === false || k !== longTokenId) {
-						n.set(k, v);
-					}
-				}
-				return n;
-			}
-
-			return new_last_result;
-		};
+            // Consume the longest valid pinyin match; use model probability
+            // to choose between tokens with equal coverage. Strict phonetics
+            // prevents a longer fuzzy match from displacing the typed word.
+            return new Map([...new_last_result].sort((a,b) =>
+                b[1].py.length-a[1].py.length || b[1].prob-a[1].prob
+            ));
+		});
 		const new_last_result = filterByPinyin(pinyin_input, this.last_result);
 
 		// 首个候选补全为长句
@@ -538,7 +545,7 @@ export class LIME {
 			) {
 				console.error("长句缓存不匹配");
 			}
-			await this.sequence.eraseContextTokenRanges([
+			await this.timedErase([
 				{
 					start: this.lastCommitOffset + cacheTokens.length,
 					end: this.sequence.contextTokens.length,
@@ -575,11 +582,12 @@ export class LIME {
 				});
 			};
 
-			const addToken = async (token: ExToken) => {
+			const addToken = async (token: ExToken, generate = true) => {
 				const tks = this.exTokens([token]);
+                if (!generate) { await this.timedEvaluate(tks); return new Map<ExToken, number>(); }
 				const r =
 					(
-						await this.sequence.controlledEvaluate([
+						await this.timedEvaluate([
 							...tks.slice(0, -1),
 							[
 								// biome-ignore lint/style/noNonNullAssertion: none
@@ -609,7 +617,14 @@ export class LIME {
 			await this.fastTryOmitContext(l);
 
 			for (let _i = 0; _i < Math.min(l, 4); _i++) {
-				const next = this.longSentenceCache.at(-1)?.nextResult;
+				const lastCache = this.longSentenceCache.at(-1);
+                let next = lastCache?.nextResult;
+                if (lastCache && next?.size === 0) {
+                    const cachedTokens = this.exTokens(lastCache.token);
+                    await this.timedErase([{start:this.sequence.contextTokens.length-cachedTokens.length,end:this.sequence.contextTokens.length}]);
+                    next = await addToken(lastCache.token[0]);
+                    lastCache.nextResult = next;
+                }
 				if (!next) {
 					console.log("no next");
 					break;
@@ -627,7 +642,7 @@ export class LIME {
 								tklppy.length,
 								tklppy.length + tp.py.length,
 							),
-							nextResult: await addToken(first[0]),
+							nextResult: await addToken(first[0], rmpyx.length > tp.py.length),
 						});
 						if (rmpyx.length === 0) {
 							break;
@@ -668,23 +683,8 @@ export class LIME {
 			});
 		}
 
-		for (const py of pinyin_input[0]) {
-			const unIndexSet = this.unIndexedZi.get(py.ind);
-			if (unIndexSet) {
-				for (const zi of unIndexSet) {
-					c.push({
-						pinyin: [py.ind],
-						score: 0.0001,
-						word: zi,
-						remainkeys: pinyin_input.slice(1).map((v) => v[0].ind),
-						preedit: py.preeditShow + (pinyin_input.length > 1 ? " " : ""),
-						consumedkeys: py.key.length,
-					});
-				}
-			}
-		}
 
-		c.sort((a, b) => b.pinyin.length - a.pinyin.length);
+		syncPhase("candidate_sort", () => c.sort((a, b) => b.pinyin.length - a.pinyin.length || b.score - a.score));
 		let tc = c;
 		for (const f of this.afterReSort) {
 			tc = f(tc);
@@ -705,7 +705,7 @@ export class LIME {
 		if (last === undefined) {
 			throw "初始token不够";
 		}
-		const x = await this.sequence.controlledEvaluate([
+		const x = await this.timedEvaluate([
 			...pre,
 			[
 				last,
@@ -726,6 +726,9 @@ export class LIME {
 	getUserData = () => {
 		return {
 			words: Object.fromEntries(this.userTokens),
+            committedContext: this.committedText,
+            contextChars: Array.from(this.committedText).length,
+            contextLimit: this.historyChars,
 			context: this.sequence.contextTokens.map((t) => ({
 				t: this.model.detokenize([t]) || "",
 				token: t,
