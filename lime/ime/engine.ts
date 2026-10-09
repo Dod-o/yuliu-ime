@@ -127,9 +127,14 @@ export class AdvancedIME {
       context?: string;
       keys?: string;
       selected?: boolean;
+      session?: string;
     },
   ) {
     const text = body.text ?? "", before = body.context ?? this.defaultContext;
+    if (body.session) {
+      const previous = this.latest.get(body.session);
+      if (previous?.reply.pending) previous.cancelled = true;
+    }
     this.defaultContext = this.recent(before + text);
     if (body.selected && body.keys) {
       this.learning.learn(normalizedKeys(body.keys)?.keys ?? "", text);

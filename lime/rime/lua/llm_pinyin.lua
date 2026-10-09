@@ -31,7 +31,7 @@ function translator.init(env)
    for _,c in ipairs(env.candidates or {}) do if c.word==text then selectedkeys=(env.input or ''):sub(1,c.consumedkeys);break end end
    env.context_text=recent(previous..text,env.history_chars)
    env.before=env.context_text;env.input=nil;env.after=''
-   local committed=request('commit',{text=text,context=previous,keys=selectedkeys,selected=selectedkeys~=nil and env.learning})
+   local committed=request('commit',{text=text,context=previous,keys=selectedkeys,selected=selectedkeys~=nil and env.learning,session=env.session})
    env.last_commit_time=committed and committed.at or 0
    ctx:set_property('llm_job','')
   end
@@ -75,16 +75,13 @@ end
 function processor.func(key,env)
  local ctx=env.engine.context
  if key:release() or not ctx:is_composing() then return 2 end
- -- Tab refreshes finished search; Space resolves the complete first choice.
- -- Numbered choices keep their displayed meaning.
- if key.keycode==0xff09 or key.keycode==32 then
+ -- Space commits the displayed choice immediately, like numbered choices.
+ -- Only explicit Tab refresh waits for the finished background search.
+ if key.keycode==0xff09 then
   local id=ctx:get_property('llm_job')
   if id and id~='' then
-   local selected=ctx:get_selected_candidate()
-   if key.keycode==0xff09 or key.keycode==32 then
-    request('result',{id=id,wait=true})
-    ctx:refresh_non_confirmed_composition()
-   end
+   request('result',{id=id,wait=true})
+   ctx:refresh_non_confirmed_composition()
   end
   if key.keycode==0xff09 then return 1 end
  end
