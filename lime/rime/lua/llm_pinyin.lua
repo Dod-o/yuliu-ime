@@ -55,6 +55,13 @@ function translator.func(input,seg,env)
  -- A cold context has no initial logits. Wait only for the first useful result;
  -- cached contexts return immediately while additional paths run in background.
  if #result.candidates==0 and result.pending then result=request('result',{id=result.job,first=true}) or result end
+ -- The synchronous Rime translator cannot receive an idle background update.
+ -- Wait for coverage of the whole composition, not suffix lookahead/final search.
+ local complete=false
+ for _,v in ipairs(result.candidates) do
+  if v.consumedkeys==#input and not v.abbreviated and not v.completion and not v.correction then complete=true;break end
+ end
+ if not complete and result.pending then result=request('result',{id=result.job,usable=true}) or result end
  ctx:set_property('llm_job',result.job or '')
  env.candidates=result.candidates
  for _,v in ipairs(result.candidates) do

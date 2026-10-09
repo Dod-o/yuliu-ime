@@ -136,7 +136,9 @@ api.post("/candidates", async (c) => {
   );
 });
 api.get("/results/:id", async (c) => {
-  const result = c.req.query("first") === "1"
+  const result = c.req.query("usable") === "1"
+    ? await advanced.waitUsable(c.req.param("id"))
+    : c.req.query("first") === "1"
     ? await advanced.waitInitial(c.req.param("id"))
     : c.req.query("wait") === "1"
     ? await advanced.waitResult(c.req.param("id"))
@@ -226,7 +228,9 @@ const pipeServer = net.createServer((socket) => {
             "http://localhost/api/" +
               (isResult
                 ? "results/" + encodeURIComponent(message.body.id) +
-                  (message.body.first
+                  (message.body.usable
+                    ? "?usable=1"
+                    : message.body.first
                     ? "?first=1"
                     : message.body.wait
                     ? "?wait=1"

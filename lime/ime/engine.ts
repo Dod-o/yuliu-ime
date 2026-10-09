@@ -52,6 +52,7 @@ type Job = {
   promise: Promise<void>;
   cancelled: boolean;
   initial: ReturnType<typeof Promise.withResolvers<void>>;
+  usable: ReturnType<typeof Promise.withResolvers<void>>;
 };
 export class AdvancedIME {
   readonly provider = new NPUProvider();
@@ -154,6 +155,18 @@ export class AdvancedIME {
     if (job && job.reply.candidates.length === 0) await job.initial.promise;
     return job?.reply;
   }
+  private hasUsable(job: Job) {
+    const strict = this.validPinyin(normalizedKeys(job.input.keys!)!.keys);
+    return job.reply.candidates.some((c) =>
+      c.consumedkeys === job.input.keys!.length &&
+      (!strict || (!c.abbreviated && !c.completion && !c.correction))
+    );
+  }
+  async waitUsable(id: string) {
+    const job = this.byId.get(id);
+    if (job && !this.hasUsable(job)) await job.usable.promise;
+    return job?.reply;
+  }
   async waitResult(id: string) {
     const job = this.byId.get(id);
     if (job) await job.promise;
@@ -201,7 +214,11 @@ export class AdvancedIME {
       // be displaced by a confident complete repair.
       return Number(bFull && !bCorrected && bStrict) -
           Number(aFull && !aCorrected && aStrict) ||
-        Number(bFull) - Number(aFull) || b.consumedkeys - a.consumedkeys ||
+        Number(bFull) - Number(aFull) ||
+        (this.validPinyin(normalizedKeys(raw)!.keys)
+          ? Number(bStrict) - Number(aStrict)
+          : 0) ||
+        b.consumedkeys - a.consumedkeys ||
         b.score - a.score;
     }).slice(0, 40);
   }
@@ -357,6 +374,7 @@ export class AdvancedIME {
       promise: Promise.resolve(),
       cancelled: false,
       initial: Promise.withResolvers<void>(),
+      usable: Promise.withResolvers<void>(),
     };
     this.jobs.set(cacheKey, job);
     this.byId.set(id, job);
@@ -372,6 +390,7 @@ export class AdvancedIME {
       reply.error = String(e);
     }).finally(() => {
       job.initial.resolve();
+      job.usable.resolve();
       reply.pending = false;
       reply.stats = {
         ms: Math.round(performance.now() - created),
@@ -407,14 +426,17 @@ export class AdvancedIME {
     );
     job.reply.revision++;
     job.initial.resolve();
+    if (this.hasUsable(job)) job.usable.resolve();
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     for (let depth = 0; depth < 7; depth++) {
       const active = frontier.filter((s) => s.offset < keys.length).sort((
         a,
         b,
       ) =>
+        Number(this.validPinyin(keys) && a.cost > 0) -
+          Number(this.validPinyin(keys) && b.cost > 0) ||
         (this.stateScore(b) + b.offset * 1.5) -
-        (this.stateScore(a) + a.offset * 1.5)
+          (this.stateScore(a) + a.offset * 1.5)
       ).slice(0, 3);
       if (!active.length) break;
       const next: State[] = [];
@@ -433,6 +455,10 @@ export class AdvancedIME {
         job.input.keys!,
       );
       job.reply.revision++;
+      if (this.hasUsable(job)) {
+        job.usable.resolve();
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
       if (all.filter((s) => s.offset === keys.length).length >= 8) break;
     }
     // Personal terms are explicitly supplied by the user, but still receive an
