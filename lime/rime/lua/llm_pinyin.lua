@@ -60,7 +60,9 @@ function translator.func(input,seg,env)
  for _,v in ipairs(result.candidates) do
   local comment=v.correction and '纠错' or ''
   local c=Candidate('llm',seg.start,seg.start+v.consumedkeys,v.word,comment)
-  c.preedit=v.preedit;yield(c)
+  -- Display the user's literal keys, never a candidate's inferred pronunciation.
+  -- Rime appends the unconsumed suffix itself for partial candidates.
+  c.preedit=input:sub(1,v.consumedkeys);yield(c)
  end
 end
 function processor.func(key,env)
