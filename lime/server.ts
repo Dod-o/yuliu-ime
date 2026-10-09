@@ -136,7 +136,9 @@ api.post("/candidates", async (c) => {
   );
 });
 api.get("/results/:id", async (c) => {
-  const result = c.req.query("wait") === "1"
+  const result = c.req.query("first") === "1"
+    ? await advanced.waitInitial(c.req.param("id"))
+    : c.req.query("wait") === "1"
     ? await advanced.waitResult(c.req.param("id"))
     : advanced.getResult(c.req.param("id"));
   return result ? c.json(result) : c.json({ error: "expired" }, 404);
@@ -224,7 +226,11 @@ const pipeServer = net.createServer((socket) => {
             "http://localhost/api/" +
               (isResult
                 ? "results/" + encodeURIComponent(message.body.id) +
-                  (message.body.wait ? "?wait=1" : "")
+                  (message.body.first
+                    ? "?first=1"
+                    : message.body.wait
+                    ? "?wait=1"
+                    : "")
                 : message.route),
             {
               method: isResult ? "GET" : "POST",

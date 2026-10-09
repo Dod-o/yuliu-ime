@@ -51,6 +51,7 @@ type Job = {
   reply: Reply;
   promise: Promise<void>;
   cancelled: boolean;
+  initial: ReturnType<typeof Promise.withResolvers<void>>;
 };
 export class AdvancedIME {
   readonly provider = new NPUProvider();
@@ -147,6 +148,11 @@ export class AdvancedIME {
   }
   getResult(id: string) {
     return this.byId.get(id)?.reply;
+  }
+  async waitInitial(id: string) {
+    const job = this.byId.get(id);
+    if (job && job.reply.candidates.length === 0) await job.initial.promise;
+    return job?.reply;
   }
   async waitResult(id: string) {
     const job = this.byId.get(id);
@@ -350,6 +356,7 @@ export class AdvancedIME {
       reply,
       promise: Promise.resolve(),
       cancelled: false,
+      initial: Promise.withResolvers<void>(),
     };
     this.jobs.set(cacheKey, job);
     this.byId.set(id, job);
@@ -364,6 +371,7 @@ export class AdvancedIME {
     ).catch((e) => {
       reply.error = String(e);
     }).finally(() => {
+      job.initial.resolve();
       reply.pending = false;
       reply.stats = {
         ms: Math.round(performance.now() - created),
@@ -398,6 +406,8 @@ export class AdvancedIME {
       job.input.keys!,
     );
     job.reply.revision++;
+    job.initial.resolve();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     for (let depth = 0; depth < 7; depth++) {
       const active = frontier.filter((s) => s.offset < keys.length).sort((
         a,
@@ -495,7 +505,10 @@ export class AdvancedIME {
     // Score a bounded suffix on every candidate in the comparison set.
     const ranked = this.rank(job.reply.candidates, job.input.keys!);
     const after = job.input.after ?? "";
-    if (after && ranked.length && performance.now() + 650 < deadline) {
+    if (
+      keys.length >= 3 && this.validPinyin(keys) && after && ranked.length &&
+      performance.now() + 650 < deadline
+    ) {
       const suffix = this.base.model.tokenize(after).slice(0, 2) as number[];
       const scored: Candidate[] = [];
       for (const c of ranked.slice(0, 3)) {

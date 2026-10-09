@@ -52,9 +52,9 @@ function translator.func(input,seg,env)
  if env.password then ctx:set_property('llm_job','');return end
  local result=request('candidates',{keys=input,context=env.before or env.context_text,after=env.after,progressive=true,session=env.session,surrounding=env.document})
  if not result then return end
- -- A cold context has no initial logits. Wait for that first useful result;
+ -- A cold context has no initial logits. Wait only for the first useful result;
  -- cached contexts return immediately while additional paths run in background.
- if #result.candidates==0 and result.pending then result=request('result',{id=result.job,wait=true}) or result end
+ if #result.candidates==0 and result.pending then result=request('result',{id=result.job,first=true}) or result end
  ctx:set_property('llm_job',result.job or '')
  env.candidates=result.candidates
  for _,v in ipairs(result.candidates) do
