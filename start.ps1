@@ -23,3 +23,9 @@ for($attempt=0;$attempt -lt 120;$attempt++) {
 }
 if(!$serviceReady){throw 'Input service startup timed out'}
 Write-Host 'NPU input service started: http://127.0.0.1:5000/try.html'
+
+$contextHelper=Join-Path $PSScriptRoot 'native/context-helper/bin/Release/net10.0-windows/ContextHelper.exe'
+if(Test-Path $contextHelper){
+ $contextProcess=Start-Process -FilePath $contextHelper -ArgumentList ('"'+(Join-Path $PSScriptRoot 'work/context.json')+'"') -WorkingDirectory $PSScriptRoot -WindowStyle Hidden -PassThru
+ $contextProcess.Id | Set-Content "$PSScriptRoot/work/context-helper.pid"
+}else{Write-Warning 'Context helper is not built; Rime uses commit history.'}

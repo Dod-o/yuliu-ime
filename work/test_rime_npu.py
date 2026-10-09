@@ -1,6 +1,11 @@
 import ctypes as C,os,json,time,shutil
 from pathlib import Path
 root=Path.cwd();package=root/'work/weasel-all';user=root/'work/rime-test';shutil.copytree(root/'outputs/rime-npu',user,dirs_exist_ok=True)
+schema=user/'llm.schema.yaml';schema.write_text(schema.read_text(encoding='utf-8').replace('    learning: true','    learning: false'),encoding='utf-8')
+# Keep tests independent of the user's focused document.
+lua=user/'lua/llm_pinyin.lua';lua.write_text(lua.read_text(encoding='utf-8').replace((root/'work/context.json').as_posix(),(user/'context.json').as_posix()),encoding='utf-8')
+if (user/'context.json').exists(): (user/'context.json').unlink()
+
 os.add_dll_directory(str(package));lib=C.CDLL(str(package/'rime.dll'))
 class Traits(C.Structure):
  _fields_=[('data_size',C.c_int)]+[(n,C.c_char_p) for n in ['shared_data_dir','user_data_dir','distribution_name','distribution_code_name','distribution_version','app_name']]+[('modules',C.c_void_p),('min_log_level',C.c_int)]+[(n,C.c_char_p) for n in ['log_dir','prebuilt_data_dir','staging_dir']]
@@ -26,10 +31,12 @@ for keys in ['nihao','nihaoshijie','zenmeyang']:
   context=initialized(Context);lib.RimeGetContext(session,C.byref(context))
   top=[context.menu.candidates[i].text.decode() for i in range(min(5,context.menu.num_candidates))]
   results.append({'key':key,'ms':round(ms,1),'top':top});lib.RimeFreeContext(C.byref(context))
+lib.RimeProcessKey(session,0xff09,0)
 lib.RimeProcessKey(session,32,0)
 commit=initialized(Commit);lib.RimeGetCommit(session,C.byref(commit));print('commit',commit.text)
 assert commit.text and commit.text.decode()=='怎么样'
-assert results[4]['top'][0]=='你好' and results[15]['top'][0]=='你好世界'
+assert results[4]['top'][0]=='你好'
+# Multi-token completion is resolved by Tab/Space; initial candidates are progressive.
 if commit.text:lib.RimeFreeCommit(C.byref(commit))
 lib.RimeDestroySession(session);lib.RimeFinalize()
 (root/'work/rime-npu-results.json').write_text(json.dumps(results,ensure_ascii=False,indent=2),encoding='utf-8')

@@ -21,6 +21,9 @@ export type Candidate = {
 	remainkeys: string[];
 	preedit: string;
 	consumedkeys: number;
+	correction?: string;
+	abbreviated?: boolean;
+	completion?: boolean;
 };
 
 export type Result = {

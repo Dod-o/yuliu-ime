@@ -33,3 +33,8 @@ try {
 & work/python-arm64/python.exe work/build_demo.py
 & work/python-arm64/python.exe work/setup_rime_files.py
 Write-Host 'Setup complete. Run ./start.ps1, then open http://127.0.0.1:5000/try.html'
+
+if(Get-Command dotnet -ErrorAction SilentlyContinue){
+ & dotnet build native/context-helper/ContextHelper.csproj -c Release --nologo
+ if($LASTEXITCODE){throw 'Context helper build failed'}
+}else{Write-Warning '.NET 10 SDK is needed to build document context helper.'}

@@ -24,3 +24,6 @@
 *.pid
 .env
 .env.*
+
+**/bin/
+**/obj/

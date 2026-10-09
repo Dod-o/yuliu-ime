@@ -13,3 +13,11 @@ if (Test-Path $npuPidFile) {
     $expectedNpuExe = Join-Path $PSScriptRoot 'work/python-arm64/python.exe'
     if ($npuServer -and $npuServer.Path -eq $expectedNpuExe) { Stop-Process -Id $npuServerId }
 }
+
+$contextPidFile=Join-Path $PSScriptRoot 'work/context-helper.pid'
+if(Test-Path $contextPidFile){
+ $contextProcessId=[int]([IO.File]::ReadAllText($contextPidFile).Trim())
+ $contextProcess=Get-Process -Id $contextProcessId -ErrorAction SilentlyContinue
+ $expectedContextExe=Join-Path $PSScriptRoot 'native/context-helper/bin/Release/net10.0-windows/ContextHelper.exe'
+ if($contextProcess -and $contextProcess.Path -eq $expectedContextExe){Stop-Process -Id $contextProcessId}
+}
